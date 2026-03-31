@@ -1,0 +1,111 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  * {
+    box-sizing: border-box;
+  }
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+    background-color: #f8f5ff;
+    color: #191919;
+  }
+}
+
+@layer components {
+  /* Card padrão do dashboard */
+  .card {
+    @apply bg-white rounded-2xl shadow-card p-6 border border-pangeia-lilas-claro/40;
+  }
+  .card:hover {
+    @apply shadow-card-hover transition-shadow duration-200;
+  }
+
+  /* KPI card — card de número principal */
+  .kpi-card {
+    @apply card flex flex-col gap-2;
+  }
+  .kpi-value {
+    @apply text-3xl font-bold text-pangeia-roxo-medio;
+  }
+  .kpi-label {
+    @apply text-sm text-gray-500 font-medium uppercase tracking-wide;
+  }
+  .kpi-delta {
+    @apply text-xs font-semibold;
+  }
+  .kpi-delta.positive { @apply text-apoio-verde-escuro; }
+  .kpi-delta.negative { @apply text-apoio-vermelho; }
+
+  /* Botão primário */
+  .btn-primary {
+    @apply bg-pangeia-roxo text-white font-semibold px-5 py-2.5 rounded-xl
+           hover:bg-pangeia-roxo-medio transition-colors duration-150 text-sm;
+  }
+
+  /* Botão secundário */
+  .btn-secondary {
+    @apply bg-pangeia-lilas-claro text-pangeia-roxo-medio font-semibold px-5 py-2.5 rounded-xl
+           hover:bg-pangeia-lilas-medio transition-colors duration-150 text-sm;
+  }
+
+  /* Badge de status */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+  .badge-success { @apply bg-apoio-verde-claro text-apoio-verde-escuro; }
+  .badge-warning { @apply bg-apoio-laranja-claro text-yellow-800; }
+  .badge-danger  { @apply bg-apoio-vermelho-claro text-apoio-vermelho; }
+  .badge-info    { @apply bg-pangeia-lilas-claro text-pangeia-roxo-medio; }
+
+  /* Barra de progresso do funil */
+  .funnel-bar {
+    @apply h-3 rounded-full bg-pangeia-lilas-claro overflow-hidden;
+  }
+  .funnel-bar-fill {
+    @apply h-full rounded-full bg-pangeia-roxo transition-all duration-500;
+  }
+
+  /* Tabela */
+  .table-wrapper {
+    @apply overflow-x-auto rounded-xl border border-pangeia-lilas-claro/40;
+  }
+  .data-table {
+    @apply w-full text-sm;
+  }
+  .data-table th {
+    @apply bg-pangeia-lilas-claro/30 text-pangeia-roxo-medio font-semibold
+           px-4 py-3 text-left uppercase tracking-wide text-xs;
+  }
+  .data-table td {
+    @apply px-4 py-3 border-t border-gray-100 text-gray-700;
+  }
+  .data-table tr:hover td {
+    @apply bg-pangeia-lilas-claro/10;
+  }
+
+  /* Sidebar */
+  .sidebar {
+    @apply bg-pangeia-roxo-profundo text-white w-64 min-h-screen flex flex-col;
+  }
+  .sidebar-link {
+    @apply flex items-center gap-3 px-5 py-3 text-sm font-medium
+           text-pangeia-lilas-claro hover:bg-white/10 rounded-xl mx-2
+           transition-colors duration-150 cursor-pointer;
+  }
+  .sidebar-link.active {
+    @apply bg-pangeia-roxo text-white;
+  }
+
+  /* Loading spinner */
+  .spinner {
+    @apply animate-spin rounded-full border-2 border-pangeia-lilas-claro border-t-pangeia-roxo;
+  }
+}
+
+/* Scrollbar customizada */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: #f8f5ff; }
+::-webkit-scrollbar-thumb { background: #CFB8F4; border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #AE76E5; }
