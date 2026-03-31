@@ -1,14 +1,21 @@
 """
 supabase_service.py — Serviço de acesso ao banco de dados Supabase
 -------------------------------------------------------------------
-Responsável por buscar e agregar dados da tabela pedidos_consolidado
-usando paginação eficiente com colunas indexadas.
+Responsável por buscar e agregar dados da tabela pedidos_unicos.
 
-Estratégia de performance:
-- Usa ORDER BY pago_em (coluna indexada) para paginação rápida
-- Processa agregações no Python após buscar os dados
-- Cache em memória para evitar consultas repetidas
-- Cada página retorna em ~0.2s, processamento total < 30s para 100k registros
+A tabela pedidos_unicos é uma view materializada que já contém
+exatamente 1 registro por pedido (deduplicado), com os campos
+mais relevantes para análise. Isso elimina a necessidade de
+deduplicação em Python e reduz drasticamente o volume de dados
+transferidos.
+
+Colunas disponíveis em pedidos_unicos:
+  id_pedido, status_pagamento, pago_em, total, email_contato,
+  nome_contato, origem_pedido, metodo_pagamento, estado_entrega,
+  cidade_entrega, codigo_cupom, tipo_cupom, desconto
+
+Para top produtos (que precisa de nome_produto/sku), ainda usa
+pedidos_consolidado com paginação normal.
 """
 
 import requests
@@ -40,7 +47,9 @@ def _get_headers():
         "Content-Type": "application/json"
     }
 
-PAGE_SIZE = 1000  # Registros por página (máximo eficiente)
+# PAGE_SIZE aumentado para 10.000 — pedidos_unicos é leve (13 colunas)
+# e responde rápido, então páginas maiores = menos requisições
+PAGE_SIZE = 10000
 
 # ----------------------------------------------------------------
 # Cache em memória (evita re-buscar dados já calculados)
@@ -65,18 +74,19 @@ def _set_cache(key: str, value: Any):
 
 # ----------------------------------------------------------------
 # Função base: busca todos os pedidos pagos no período
+# Usa pedidos_unicos — já 1 linha por pedido, sem deduplicação
 # ----------------------------------------------------------------
-def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
+def _fetch_pedidos_pagos(date_from: str, date_to: str) -> List[Dict]:
     """
-    Busca todos os pedidos pagos no período usando paginação eficiente.
-    Retorna dicionário com id_pedido como chave (deduplicado).
+    Busca todos os pedidos pagos no período usando pedidos_unicos.
+    Retorna lista de dicionários (1 item = 1 pedido, já deduplicado).
 
     Args:
         date_from: Data inicial no formato YYYY-MM-DD
         date_to:   Data final no formato YYYY-MM-DD
 
     Returns:
-        Dict[id_pedido -> dados do pedido]
+        List[Dict] — lista de pedidos com campos normalizados
     """
     cache_key = f"pedidos_{date_from}_{date_to}"
     cached = _get_cache(cache_key)
@@ -84,26 +94,25 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
         logger.info(f"📦 Cache hit: pedidos {date_from} → {date_to}")
         return cached
 
-    logger.info(f"🔍 Buscando pedidos pagos: {date_from} → {date_to}")
-    pedidos = {}
+    logger.info(f"🔍 Buscando pedidos pagos (pedidos_unicos): {date_from} → {date_to}")
+    pedidos = []
     offset = 0
-    total_rows = 0
     start = time.time()
 
     while True:
         try:
             r = requests.get(
-                f"{_get_supabase_url()}/rest/v1/pedidos_consolidado"
-                f"?select=id_pedido,total,total_pago,email_contato,origem_pedido,"
-                f"metodo_pagamento,pago_em,estado_entrega,cidade_entrega,"
-                f"nome_contato,codigo_cupom,tipo_cupom,desconto"
+                f"{_get_supabase_url()}/rest/v1/pedidos_unicos"
+                f"?select=id_pedido,total,email_contato,nome_contato,"
+                f"origem_pedido,metodo_pagamento,pago_em,estado_entrega,"
+                f"cidade_entrega,codigo_cupom,tipo_cupom,desconto"
                 f"&status_pagamento=eq.paid"
                 f"&pago_em=gte.{date_from}T00:00:00"
                 f"&pago_em=lte.{date_to}T23:59:59"
                 f"&order=pago_em.asc"
                 f"&limit={PAGE_SIZE}&offset={offset}",
                 headers=_get_headers(),
-                timeout=15
+                timeout=20
             )
 
             if r.status_code != 200:
@@ -111,26 +120,24 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
                 break
 
             data = r.json()
-            if not data:
+            if not isinstance(data, list) or not data:
                 break
 
-            total_rows += len(data)
-
+            # Normaliza os campos para uso consistente no restante do serviço
             for row in data:
-                pid = row['id_pedido']
-                if pid not in pedidos:
-                    pedidos[pid] = {
-                        'total': float(row.get('total') or row.get('total_pago') or 0),
-                        'email': (row.get('email_contato') or '').lower().strip(),
-                        'nome': row.get('nome_contato', ''),
-                        'origem': row.get('origem_pedido') or 'unknown',
-                        'metodo': row.get('metodo_pagamento') or 'unknown',
-                        'pago_em': (row.get('pago_em') or '')[:10],
-                        'estado': row.get('estado_entrega') or 'Desconhecido',
-                        'cidade': row.get('cidade_entrega') or '',
-                        'cupom': row.get('codigo_cupom') or '',
-                        'desconto': float(row.get('desconto') or 0),
-                    }
+                pedidos.append({
+                    'id_pedido': row['id_pedido'],
+                    'total': float(row.get('total') or 0),
+                    'email': (row.get('email_contato') or '').lower().strip(),
+                    'nome': row.get('nome_contato', ''),
+                    'origem': row.get('origem_pedido') or 'unknown',
+                    'metodo': row.get('metodo_pagamento') or 'unknown',
+                    'pago_em': (row.get('pago_em') or '')[:10],
+                    'estado': row.get('estado_entrega') or 'Desconhecido',
+                    'cidade': row.get('cidade_entrega') or '',
+                    'cupom': row.get('codigo_cupom') or '',
+                    'desconto': float(row.get('desconto') or 0),
+                })
 
             offset += PAGE_SIZE
             if len(data) < PAGE_SIZE:
@@ -145,7 +152,7 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
             break
 
     elapsed = time.time() - start
-    logger.info(f"✅ {len(pedidos)} pedidos únicos ({total_rows} linhas) em {elapsed:.1f}s")
+    logger.info(f"✅ {len(pedidos)} pedidos carregados em {elapsed:.1f}s")
 
     _set_cache(cache_key, pedidos)
     return pedidos
@@ -154,16 +161,18 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
 def _fetch_produtos_pedidos(date_from: str, date_to: str) -> List[Dict]:
     """
     Busca todos os produtos dos pedidos pagos no período.
-    Usado para análise de top produtos.
+    Ainda usa pedidos_consolidado pois pedidos_unicos não tem nome_produto.
+    Usado exclusivamente para análise de top produtos.
     """
     cache_key = f"produtos_{date_from}_{date_to}"
     cached = _get_cache(cache_key)
     if cached is not None:
         return cached
 
-    logger.info(f"🛍️ Buscando produtos: {date_from} → {date_to}")
+    logger.info(f"🛍️ Buscando produtos (pedidos_consolidado): {date_from} → {date_to}")
     produtos = []
     offset = 0
+    PAGE = 5000  # Página menor pois pedidos_consolidado é mais pesada
 
     while True:
         try:
@@ -174,22 +183,22 @@ def _fetch_produtos_pedidos(date_from: str, date_to: str) -> List[Dict]:
                 f"&pago_em=gte.{date_from}T00:00:00"
                 f"&pago_em=lte.{date_to}T23:59:59"
                 f"&order=pago_em.asc"
-                f"&limit={PAGE_SIZE}&offset={offset}",
+                f"&limit={PAGE}&offset={offset}",
                 headers=_get_headers(),
-                timeout=15
+                timeout=20
             )
 
             if r.status_code != 200:
                 break
 
             data = r.json()
-            if not data:
+            if not isinstance(data, list) or not data:
                 break
 
             produtos.extend(data)
-            offset += PAGE_SIZE
+            offset += PAGE
 
-            if len(data) < PAGE_SIZE:
+            if len(data) < PAGE:
                 break
 
         except Exception as e:
@@ -226,9 +235,9 @@ def get_kpis(date_from: str, date_to: Optional[str] = None) -> Dict[str, Any]:
             "periodo": {"de": date_from, "ate": date_to}
         }
 
-    receita_total = sum(p['total'] for p in pedidos.values())
+    receita_total = sum(p['total'] for p in pedidos)
     total_pedidos = len(pedidos)
-    clientes_unicos = len(set(p['email'] for p in pedidos.values() if p['email']))
+    clientes_unicos = len(set(p['email'] for p in pedidos if p['email']))
 
     return {
         "total_pedidos": total_pedidos,
@@ -252,7 +261,7 @@ def get_timeline(date_from: str, date_to: Optional[str] = None, granularity: str
     pedidos = _fetch_pedidos_pagos(date_from, date_to)
     timeline = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
 
-    for p in pedidos.values():
+    for p in pedidos:
         data_str = p['pago_em']
         if not data_str:
             continue
@@ -291,7 +300,7 @@ def get_por_canal(date_from: str, date_to: Optional[str] = None) -> Dict[str, An
     por_origem = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
     por_metodo = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
 
-    for p in pedidos.values():
+    for p in pedidos:
         origem = p['origem'] or 'unknown'
         metodo = p['metodo'] or 'unknown'
         por_origem[origem]["pedidos"] += 1
@@ -323,7 +332,7 @@ def get_por_estado(date_from: str, date_to: Optional[str] = None) -> List[Dict]:
     pedidos = _fetch_pedidos_pagos(date_from, date_to)
     por_estado = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
 
-    for p in pedidos.values():
+    for p in pedidos:
         estado = p['estado'] or 'Desconhecido'
         por_estado[estado]["pedidos"] += 1
         por_estado[estado]["receita"] += p['total']
@@ -338,6 +347,7 @@ def get_por_estado(date_from: str, date_to: Optional[str] = None) -> List[Dict]:
 def get_top_produtos(date_from: str, date_to: Optional[str] = None, limit: int = 10) -> List[Dict]:
     """
     Retorna os produtos mais vendidos por receita.
+    Usa pedidos_consolidado pois pedidos_unicos não tem nome_produto.
     """
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
@@ -378,21 +388,21 @@ def get_dashboard_completo(date_from: str, date_to: Optional[str] = None) -> Dic
     logger.info(f"🏗️ Construindo dashboard: {date_from} → {date_to}")
     start = time.time()
 
-    # Busca os dados base uma única vez
+    # Busca os dados base uma única vez (pedidos_unicos — rápido)
     pedidos = _fetch_pedidos_pagos(date_from, date_to)
 
     # Calcula todas as métricas a partir dos dados em memória
-    receita_total = sum(p['total'] for p in pedidos.values())
+    receita_total = sum(p['total'] for p in pedidos)
     total_pedidos = len(pedidos)
-    clientes_unicos = len(set(p['email'] for p in pedidos.values() if p['email']))
+    clientes_unicos = len(set(p['email'] for p in pedidos if p['email']))
 
-    # Timeline
+    # Agrega por dimensão em uma única passagem
     timeline_data = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
     por_origem = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
     por_metodo = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
     por_estado = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
 
-    for p in pedidos.values():
+    for p in pedidos:
         dia = p['pago_em']
         if dia:
             timeline_data[dia]["pedidos"] += 1
@@ -410,7 +420,7 @@ def get_dashboard_completo(date_from: str, date_to: Optional[str] = None) -> Dic
         por_estado[estado]["pedidos"] += 1
         por_estado[estado]["receita"] += p['total']
 
-    # Top produtos (busca separada)
+    # Top produtos (busca separada em pedidos_consolidado)
     top_produtos = get_top_produtos(date_from, date_to, 10)
 
     result = {
