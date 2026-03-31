@@ -117,6 +117,32 @@ async def debug_env():
     }
 
 
+@app.get("/debug/supabase", summary="Debug: testa query direta ao Supabase")
+async def debug_supabase():
+    """Testa a conexão e query diretamente ao Supabase para diagnóstico."""
+    import requests as req
+    url = settings.supabase_url
+    key = settings.supabase_service_key
+    headers = {"apikey": key, "Authorization": f"Bearer {key}"}
+    
+    # Testa query simples sem filtro de data
+    r1 = req.get(
+        f"{url}/rest/v1/pedidos_consolidado?select=id_pedido,status_pagamento,pago_em&limit=3&order=id_pedido.desc",
+        headers=headers, timeout=15
+    )
+    
+    # Testa query com filtro de status paid
+    r2 = req.get(
+        f"{url}/rest/v1/pedidos_consolidado?select=id_pedido,status_pagamento,pago_em,total&status_pagamento=eq.paid&limit=3&order=pago_em.desc",
+        headers=headers, timeout=15
+    )
+    
+    return {
+        "sem_filtro": {"status": r1.status_code, "data": r1.json()},
+        "com_filtro_paid": {"status": r2.status_code, "data": r2.json()},
+    }
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """
