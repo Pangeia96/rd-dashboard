@@ -19,19 +19,26 @@ from typing import Optional, Dict, Any, List
 from config import get_settings
 from loguru import logger
 
-settings = get_settings()
+import os
 
 # ----------------------------------------------------------------
 # Configuração da conexão
+# Lida diretamente das variáveis de ambiente para garantir que
+# os valores do Render sejam sempre usados (evita problema de cache)
 # ----------------------------------------------------------------
-SUPABASE_URL = settings.supabase_url
-SERVICE_KEY = settings.supabase_service_key
+def _get_supabase_url():
+    return os.environ.get("SUPABASE_URL") or get_settings().supabase_url
 
-HEADERS = {
-    "apikey": SERVICE_KEY,
-    "Authorization": f"Bearer {SERVICE_KEY}",
-    "Content-Type": "application/json"
-}
+def _get_service_key():
+    return os.environ.get("SUPABASE_SERVICE_KEY") or get_settings().supabase_service_key
+
+def _get_headers():
+    key = _get_service_key()
+    return {
+        "apikey": key,
+        "Authorization": f"Bearer {key}",
+        "Content-Type": "application/json"
+    }
 
 PAGE_SIZE = 1000  # Registros por página (máximo eficiente)
 
@@ -86,7 +93,7 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
     while True:
         try:
             r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/pedidos_consolidado"
+                f"{_get_supabase_url()}/rest/v1/pedidos_consolidado"
                 f"?select=id_pedido,total,total_pago,email_contato,origem_pedido,"
                 f"metodo_pagamento,pago_em,estado_entrega,cidade_entrega,"
                 f"nome_contato,codigo_cupom,tipo_cupom,desconto"
@@ -95,7 +102,7 @@ def _fetch_pedidos_pagos(date_from: str, date_to: str) -> Dict[str, Any]:
                 f"&pago_em=lte.{date_to}T23:59:59"
                 f"&order=pago_em.asc"
                 f"&limit={PAGE_SIZE}&offset={offset}",
-                headers=HEADERS,
+                headers=_get_headers(),
                 timeout=15
             )
 
@@ -161,14 +168,14 @@ def _fetch_produtos_pedidos(date_from: str, date_to: str) -> List[Dict]:
     while True:
         try:
             r = requests.get(
-                f"{SUPABASE_URL}/rest/v1/pedidos_consolidado"
+                f"{_get_supabase_url()}/rest/v1/pedidos_consolidado"
                 f"?select=id_pedido,nome_produto,nome_produto_simples,sku_produto,quantidade,preco"
                 f"&status_pagamento=eq.paid"
                 f"&pago_em=gte.{date_from}T00:00:00"
                 f"&pago_em=lte.{date_to}T23:59:59"
                 f"&order=pago_em.asc"
                 f"&limit={PAGE_SIZE}&offset={offset}",
-                headers=HEADERS,
+                headers=_get_headers(),
                 timeout=15
             )
 
