@@ -111,7 +111,9 @@ async def debug_env():
     return {
         "supabase_url": os.environ.get("SUPABASE_URL", "NÃO DEFINIDA"),
         "supabase_url_config": settings.supabase_url,
-        "supabase_key_prefix": (settings.supabase_service_key or "")[:20] + "...",
+        "service_key_env": (os.environ.get("SUPABASE_SERVICE_KEY") or "")[:60] + "...",
+        "service_key_config": (settings.supabase_service_key or "")[:60] + "...",
+        "anon_key_env": (os.environ.get("SUPABASE_ANON_KEY") or "")[:60] + "...",
         "environment": settings.environment,
         "rd_client_id": settings.rd_client_id,
     }
