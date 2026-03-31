@@ -121,8 +121,11 @@ async def debug_env():
 async def debug_supabase():
     """Testa a conexão e query diretamente ao Supabase para diagnóstico."""
     import requests as req
-    url = settings.supabase_url
-    key = settings.supabase_service_key
+    import os
+    
+    # Lê credenciais diretamente do ambiente (igual ao supabase_service.py corrigido)
+    url = os.environ.get("SUPABASE_URL") or settings.supabase_url
+    key = os.environ.get("SUPABASE_SERVICE_KEY") or settings.supabase_service_key
     headers = {"apikey": key, "Authorization": f"Bearer {key}"}
     
     # Testa query simples sem filtro de data
@@ -138,8 +141,10 @@ async def debug_supabase():
     )
     
     return {
-        "sem_filtro": {"status": r1.status_code, "data": r1.json()},
-        "com_filtro_paid": {"status": r2.status_code, "data": r2.json()},
+        "url_usada": url,
+        "key_prefix": key[:25] + "..." if key else "VAZIA",
+        "sem_filtro": {"status": r1.status_code, "raw": r1.text[:500], "data": r1.json() if r1.status_code == 200 else []},
+        "com_filtro_paid": {"status": r2.status_code, "raw": r2.text[:500], "data": r2.json() if r2.status_code == 200 else []},
     }
 
 
