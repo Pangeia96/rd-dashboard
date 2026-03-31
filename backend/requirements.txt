@@ -1,6 +1,6 @@
 # Dependências do backend — RD Station Dashboard Pangeia 96
 # Instale com: pip install -r requirements.txt
-# Python 3.11 recomendado
+# Python 3.11 recomendado (.python-version)
 
 # Framework web principal
 fastapi==0.104.1
@@ -30,6 +30,3 @@ cachetools==5.3.2
 
 # Para geração de logs estruturados
 loguru==0.7.2
-
-# Para operações assíncronas
-anyio==4.2.0
