@@ -104,6 +104,19 @@ async def root():
     }
 
 
+@app.get("/debug/env", summary="Debug: verifica variáveis de ambiente")
+async def debug_env():
+    """Endpoint temporário para verificar variáveis de ambiente no Render."""
+    import os
+    return {
+        "supabase_url": os.environ.get("SUPABASE_URL", "NÃO DEFINIDA"),
+        "supabase_url_config": settings.supabase_url,
+        "supabase_key_prefix": (settings.supabase_service_key or "")[:20] + "...",
+        "environment": settings.environment,
+        "rd_client_id": settings.rd_client_id,
+    }
+
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
     """
