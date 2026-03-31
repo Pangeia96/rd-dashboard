@@ -1,34 +1,35 @@
 # Dependências do backend — RD Station Dashboard Pangeia 96
 # Instale com: pip install -r requirements.txt
+# Python 3.11 recomendado
 
 # Framework web principal
-fastapi==0.111.0
+fastapi==0.104.1
 
 # Servidor ASGI para rodar o FastAPI
-uvicorn[standard]==0.29.0
+uvicorn[standard]==0.24.0
 
 # Para fazer requisições HTTP à API da RD Station e NuvemShop
-httpx==0.27.0
+httpx==0.25.2
 requests==2.31.0
 
 # Para carregar variáveis do arquivo .env
-python-dotenv==1.0.1
+python-dotenv==1.0.0
 
 # Para agendar tarefas automáticas (sincronização dos dados)
 apscheduler==3.10.4
 
 # Para manipulação de datas e horários
-python-dateutil==2.9.0
+python-dateutil==2.8.2
 
-# Para validação de dados e modelos
-pydantic==2.7.1
-pydantic-settings==2.2.1
+# Para validação de dados e modelos (versão compatível com Python 3.11)
+pydantic==2.5.3
+pydantic-settings==2.1.0
 
 # Para cache em memória
-cachetools==5.3.3
+cachetools==5.3.2
 
 # Para geração de logs estruturados
 loguru==0.7.2
 
 # Para operações assíncronas
-anyio==4.3.0
+anyio==4.2.0
