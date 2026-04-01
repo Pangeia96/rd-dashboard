@@ -68,7 +68,9 @@ app.add_middleware(
         "https://www.pangeia96.com.br", # Domínio principal da Pangeia 96
         "https://pangeia96.com.br",     # Sem www
         "https://*.vercel.app",         # Deploy na Vercel
-        "https://rd-dashboard-frontend.vercel.app",  # Frontend em produção
+        "https://rd-dashboard-frontend.vercel.app",  # Frontend em produção (Vercel)
+        "https://rd-dashboard-og8o.onrender.com",       # Frontend em produção (Render)
+        "https://*.onrender.com",                        # Qualquer subdomínio do Render
     ],
     allow_credentials=True,
     allow_methods=["*"],
