@@ -31,3 +31,14 @@ services:
         sync: false
       - key: DEFAULT_DATE_FROM
         value: "2025-09-01"
+
+  # ── Frontend Vue.js (Express estático) ──────────────────────────────
+  - type: web
+    name: rd-dashboard-frontend
+    env: node
+    region: oregon
+    plan: starter
+    rootDir: frontend
+    buildCommand: "npm install && VITE_API_URL=https://rd-dashboard-backend.onrender.com npm run build"
+    startCommand: "npm start"
+    healthCheckPath: /
