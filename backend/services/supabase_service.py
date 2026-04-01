@@ -1,62 +1,59 @@
 """
 supabase_service.py — Serviço de acesso ao banco de dados Supabase
 -------------------------------------------------------------------
-Responsável por buscar e agregar dados da tabela pedidos_unicos.
+Usa funções SQL criadas diretamente no banco (via RPC) para agregar
+os dados de pedidos. Isso elimina paginação e resolve timeouts:
+o banco calcula tudo internamente e retorna apenas o resultado final.
 
-A tabela pedidos_unicos é uma view materializada que já contém
-exatamente 1 registro por pedido (deduplicado), com os campos
-mais relevantes para análise. Isso elimina a necessidade de
-deduplicação em Python e reduz drasticamente o volume de dados
-transferidos.
+Funções disponíveis no Supabase:
+  - get_pedidos_resumo(date_from, date_to)     → KPIs principais
+  - get_pedidos_timeline(date_from, date_to)   → Evolução diária
+  - get_pedidos_por_canal(date_from, date_to)  → Por origem/pagamento
+  - get_pedidos_por_estado(date_from, date_to) → Por UF
+  - get_top_produtos(date_from, date_to, limit)→ Top 10 produtos
+  - get_dashboard_completo(date_from, date_to) → Tudo em 1 chamada
 
-Colunas disponíveis em pedidos_unicos:
-  id_pedido, status_pagamento, pago_em, total, email_contato,
-  nome_contato, origem_pedido, metodo_pagamento, estado_entrega,
-  cidade_entrega, codigo_cupom, tipo_cupom, desconto
-
-Para top produtos (que precisa de nome_produto/sku), ainda usa
-pedidos_consolidado com paginação normal.
+Tabela base: pedidos_resumo (1 linha por pedido, com concluido_em)
 """
 
 import requests
 import time
-from collections import defaultdict
-from datetime import datetime, timedelta
+from datetime import datetime
 from typing import Optional, Dict, Any, List
+import os
+
 from config import get_settings
 from loguru import logger
 
-import os
 
 # ----------------------------------------------------------------
-# Configuração da conexão
-# Lida diretamente das variáveis de ambiente para garantir que
-# os valores do Render sejam sempre usados (evita problema de cache)
+# Configuração da conexão — lida diretamente do ambiente
+# para garantir que os valores do Render sejam sempre usados
 # ----------------------------------------------------------------
-def _get_supabase_url():
+def _get_supabase_url() -> str:
     return os.environ.get("SUPABASE_URL") or get_settings().supabase_url
 
-def _get_service_key():
+
+def _get_service_key() -> str:
     return os.environ.get("SUPABASE_SERVICE_KEY") or get_settings().supabase_service_key
 
-def _get_headers():
+
+def _get_headers() -> Dict[str, str]:
     key = _get_service_key()
     return {
         "apikey": key,
         "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
     }
 
-# PAGE_SIZE aumentado para 10.000 — pedidos_unicos é leve (13 colunas)
-# e responde rápido, então páginas maiores = menos requisições
-PAGE_SIZE = 10000
 
 # ----------------------------------------------------------------
-# Cache em memória (evita re-buscar dados já calculados)
+# Cache em memória — evita re-buscar dados já calculados
 # ----------------------------------------------------------------
 _cache: Dict[str, Any] = {}
 _cache_ttl: Dict[str, float] = {}
-CACHE_DURATION = 1800  # 30 minutos em segundos
+CACHE_DURATION = 1800  # 30 minutos
 
 
 def _get_cache(key: str) -> Optional[Any]:
@@ -73,144 +70,39 @@ def _set_cache(key: str, value: Any):
 
 
 # ----------------------------------------------------------------
-# Função base: busca todos os pedidos pagos no período
-# Usa pedidos_unicos — já 1 linha por pedido, sem deduplicação
+# Função base: chama uma função SQL via RPC do Supabase
 # ----------------------------------------------------------------
-def _fetch_pedidos_pagos(date_from: str, date_to: str) -> List[Dict]:
+def _call_rpc(function_name: str, params: Dict[str, Any], timeout: int = 25) -> Any:
     """
-    Busca todos os pedidos pagos no período usando pedidos_unicos.
-    Retorna lista de dicionários (1 item = 1 pedido, já deduplicado).
+    Chama uma função SQL do Supabase via RPC (Remote Procedure Call).
+    O banco executa a função internamente e retorna apenas o resultado.
 
     Args:
-        date_from: Data inicial no formato YYYY-MM-DD
-        date_to:   Data final no formato YYYY-MM-DD
+        function_name: Nome da função SQL (ex: 'get_pedidos_resumo')
+        params: Parâmetros da função (ex: {'p_date_from': '2026-03-01'})
+        timeout: Timeout em segundos
 
     Returns:
-        List[Dict] — lista de pedidos com campos normalizados
+        Resultado da função (dict, list ou None)
     """
-    cache_key = f"pedidos_{date_from}_{date_to}"
-    cached = _get_cache(cache_key)
-    if cached is not None:
-        logger.info(f"📦 Cache hit: pedidos {date_from} → {date_to}")
-        return cached
-
-    logger.info(f"🔍 Buscando pedidos pagos (pedidos_unicos): {date_from} → {date_to}")
-    pedidos = []
-    offset = 0
-    start = time.time()
-
-    while True:
-        try:
-            r = requests.get(
-                f"{_get_supabase_url()}/rest/v1/pedidos_unicos"
-                f"?select=id_pedido,total,email_contato,nome_contato,"
-                f"origem_pedido,metodo_pagamento,pago_em,estado_entrega,"
-                f"cidade_entrega,codigo_cupom,tipo_cupom,desconto"
-                f"&status_pagamento=eq.paid"
-                f"&pago_em=gte.{date_from}T00:00:00"
-                f"&pago_em=lte.{date_to}T23:59:59"
-                f"&order=pago_em.asc"
-                f"&limit={PAGE_SIZE}&offset={offset}",
-                headers=_get_headers(),
-                timeout=20
-            )
-
-            if r.status_code != 200:
-                logger.error(f"Erro ao buscar pedidos (offset={offset}): {r.text[:200]}")
-                break
-
-            data = r.json()
-            if not isinstance(data, list) or not data:
-                break
-
-            # Normaliza os campos para uso consistente no restante do serviço
-            for row in data:
-                pedidos.append({
-                    'id_pedido': row['id_pedido'],
-                    'total': float(row.get('total') or 0),
-                    'email': (row.get('email_contato') or '').lower().strip(),
-                    'nome': row.get('nome_contato', ''),
-                    'origem': row.get('origem_pedido') or 'unknown',
-                    'metodo': row.get('metodo_pagamento') or 'unknown',
-                    'pago_em': (row.get('pago_em') or '')[:10],
-                    'estado': row.get('estado_entrega') or 'Desconhecido',
-                    'cidade': row.get('cidade_entrega') or '',
-                    'cupom': row.get('codigo_cupom') or '',
-                    'desconto': float(row.get('desconto') or 0),
-                })
-
-            offset += PAGE_SIZE
-            if len(data) < PAGE_SIZE:
-                break
-
-        except requests.Timeout:
-            logger.warning(f"Timeout na página offset={offset}, tentando novamente...")
-            time.sleep(1)
-            continue
-        except Exception as e:
-            logger.error(f"Erro inesperado: {e}")
-            break
-
-    elapsed = time.time() - start
-    logger.info(f"✅ {len(pedidos)} pedidos carregados em {elapsed:.1f}s")
-
-    _set_cache(cache_key, pedidos)
-    return pedidos
-
-
-def _fetch_produtos_pedidos(date_from: str, date_to: str) -> List[Dict]:
-    """
-    Busca todos os produtos dos pedidos pagos no período.
-    Ainda usa pedidos_consolidado pois pedidos_unicos não tem nome_produto.
-    Usado exclusivamente para análise de top produtos.
-    """
-    cache_key = f"produtos_{date_from}_{date_to}"
-    cached = _get_cache(cache_key)
-    if cached is not None:
-        return cached
-
-    logger.info(f"🛍️ Buscando produtos (pedidos_consolidado): {date_from} → {date_to}")
-    produtos = []
-    offset = 0
-    PAGE = 5000  # Página menor pois pedidos_consolidado é mais pesada
-
-    while True:
-        try:
-            r = requests.get(
-                f"{_get_supabase_url()}/rest/v1/pedidos_consolidado"
-                f"?select=id_pedido,nome_produto,nome_produto_simples,sku_produto,quantidade,preco"
-                f"&status_pagamento=eq.paid"
-                f"&pago_em=gte.{date_from}T00:00:00"
-                f"&pago_em=lte.{date_to}T23:59:59"
-                f"&order=pago_em.asc"
-                f"&limit={PAGE}&offset={offset}",
-                headers=_get_headers(),
-                timeout=20
-            )
-
-            if r.status_code != 200:
-                break
-
-            data = r.json()
-            if not isinstance(data, list) or not data:
-                break
-
-            produtos.extend(data)
-            offset += PAGE
-
-            if len(data) < PAGE:
-                break
-
-        except Exception as e:
-            logger.error(f"Erro ao buscar produtos: {e}")
-            break
-
-    _set_cache(cache_key, produtos)
-    return produtos
+    url = f"{_get_supabase_url()}/rest/v1/rpc/{function_name}"
+    try:
+        r = requests.post(url, json=params, headers=_get_headers(), timeout=timeout)
+        if r.status_code == 200:
+            return r.json()
+        else:
+            logger.error(f"❌ RPC {function_name} falhou [{r.status_code}]: {r.text[:300]}")
+            return None
+    except requests.Timeout:
+        logger.error(f"⏱️ Timeout ao chamar {function_name}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Erro ao chamar {function_name}: {e}")
+        return None
 
 
 # ----------------------------------------------------------------
-# Funções de métricas
+# Funções públicas do serviço
 # ----------------------------------------------------------------
 
 def get_kpis(date_from: str, date_to: Optional[str] = None) -> Dict[str, Any]:
@@ -220,14 +112,31 @@ def get_kpis(date_from: str, date_to: Optional[str] = None) -> Dict[str, Any]:
     - Receita total
     - Ticket médio
     - Clientes únicos
+
+    Usa a função SQL get_pedidos_resumo() que agrega no banco.
     """
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
 
-    pedidos = _fetch_pedidos_pagos(date_from, date_to)
+    cache_key = f"kpis_{date_from}_{date_to}"
+    cached = _get_cache(cache_key)
+    if cached is not None:
+        logger.info(f"📦 Cache hit: KPIs {date_from} → {date_to}")
+        return cached
 
-    if not pedidos:
-        return {
+    logger.info(f"🔍 Buscando KPIs via RPC: {date_from} → {date_to}")
+    start = time.time()
+
+    result = _call_rpc("get_pedidos_resumo", {
+        "p_date_from": date_from,
+        "p_date_to": date_to
+    })
+
+    elapsed = time.time() - start
+    logger.info(f"✅ KPIs obtidos em {elapsed:.2f}s")
+
+    if not result:
+        result = {
             "total_pedidos": 0,
             "receita_total": 0.0,
             "ticket_medio": 0.0,
@@ -235,20 +144,15 @@ def get_kpis(date_from: str, date_to: Optional[str] = None) -> Dict[str, Any]:
             "periodo": {"de": date_from, "ate": date_to}
         }
 
-    receita_total = sum(p['total'] for p in pedidos)
-    total_pedidos = len(pedidos)
-    clientes_unicos = len(set(p['email'] for p in pedidos if p['email']))
-
-    return {
-        "total_pedidos": total_pedidos,
-        "receita_total": round(receita_total, 2),
-        "ticket_medio": round(receita_total / total_pedidos, 2) if total_pedidos > 0 else 0.0,
-        "total_clientes": clientes_unicos,
-        "periodo": {"de": date_from, "ate": date_to}
-    }
+    _set_cache(cache_key, result)
+    return result
 
 
-def get_timeline(date_from: str, date_to: Optional[str] = None, granularity: str = "day") -> List[Dict]:
+def get_timeline(
+    date_from: str,
+    date_to: Optional[str] = None,
+    granularity: str = "day"
+) -> List[Dict]:
     """
     Retorna a evolução de vendas ao longo do tempo.
 
@@ -258,33 +162,23 @@ def get_timeline(date_from: str, date_to: Optional[str] = None, granularity: str
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
 
-    pedidos = _fetch_pedidos_pagos(date_from, date_to)
-    timeline = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
+    cache_key = f"timeline_{date_from}_{date_to}_{granularity}"
+    cached = _get_cache(cache_key)
+    if cached is not None:
+        return cached
 
-    for p in pedidos:
-        data_str = p['pago_em']
-        if not data_str:
-            continue
-        try:
-            dt = datetime.strptime(data_str, '%Y-%m-%d')
-            if granularity == 'month':
-                key = dt.strftime('%Y-%m')
-            elif granularity == 'week':
-                # Início da semana (segunda-feira)
-                inicio_semana = dt - timedelta(days=dt.weekday())
-                key = inicio_semana.strftime('%Y-%m-%d')
-            else:
-                key = data_str
-        except:
-            key = data_str
+    logger.info(f"📈 Buscando timeline via RPC: {date_from} → {date_to} ({granularity})")
 
-        timeline[key]["pedidos"] += 1
-        timeline[key]["receita"] += p['total']
+    result = _call_rpc("get_pedidos_timeline", {
+        "p_date_from": date_from,
+        "p_date_to": date_to,
+        "p_granularity": granularity
+    })
 
-    result = [
-        {"data": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-        for k, v in sorted(timeline.items())
-    ]
+    if not result:
+        result = []
+
+    _set_cache(cache_key, result)
     return result
 
 
@@ -295,31 +189,23 @@ def get_por_canal(date_from: str, date_to: Optional[str] = None) -> Dict[str, An
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
 
-    pedidos = _fetch_pedidos_pagos(date_from, date_to)
+    cache_key = f"canal_{date_from}_{date_to}"
+    cached = _get_cache(cache_key)
+    if cached is not None:
+        return cached
 
-    por_origem = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
-    por_metodo = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
+    logger.info(f"📊 Buscando canais via RPC: {date_from} → {date_to}")
 
-    for p in pedidos:
-        origem = p['origem'] or 'unknown'
-        metodo = p['metodo'] or 'unknown'
-        por_origem[origem]["pedidos"] += 1
-        por_origem[origem]["receita"] += p['total']
-        por_metodo[metodo]["pedidos"] += 1
-        por_metodo[metodo]["receita"] += p['total']
+    result = _call_rpc("get_pedidos_por_canal", {
+        "p_date_from": date_from,
+        "p_date_to": date_to
+    })
 
-    return {
-        "por_origem": sorted(
-            [{"canal": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-             for k, v in por_origem.items()],
-            key=lambda x: -x["receita"]
-        ),
-        "por_pagamento": sorted(
-            [{"metodo": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-             for k, v in por_metodo.items()],
-            key=lambda x: -x["receita"]
-        )
-    }
+    if not result:
+        result = {"por_origem": [], "por_pagamento": []}
+
+    _set_cache(cache_key, result)
+    return result
 
 
 def get_por_estado(date_from: str, date_to: Optional[str] = None) -> List[Dict]:
@@ -329,52 +215,63 @@ def get_por_estado(date_from: str, date_to: Optional[str] = None) -> List[Dict]:
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
 
-    pedidos = _fetch_pedidos_pagos(date_from, date_to)
-    por_estado = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
+    cache_key = f"estado_{date_from}_{date_to}"
+    cached = _get_cache(cache_key)
+    if cached is not None:
+        return cached
 
-    for p in pedidos:
-        estado = p['estado'] or 'Desconhecido'
-        por_estado[estado]["pedidos"] += 1
-        por_estado[estado]["receita"] += p['total']
+    logger.info(f"🗺️ Buscando estados via RPC: {date_from} → {date_to}")
 
-    return sorted(
-        [{"estado": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-         for k, v in por_estado.items()],
-        key=lambda x: -x["receita"]
-    )
+    result = _call_rpc("get_pedidos_por_estado", {
+        "p_date_from": date_from,
+        "p_date_to": date_to
+    })
+
+    if not result:
+        result = []
+
+    _set_cache(cache_key, result)
+    return result
 
 
-def get_top_produtos(date_from: str, date_to: Optional[str] = None, limit: int = 10) -> List[Dict]:
+def get_top_produtos(
+    date_from: str,
+    date_to: Optional[str] = None,
+    limit: int = 10
+) -> List[Dict]:
     """
     Retorna os produtos mais vendidos por receita.
-    Usa pedidos_consolidado pois pedidos_unicos não tem nome_produto.
     """
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
 
-    produtos_raw = _fetch_produtos_pedidos(date_from, date_to)
-    por_produto = defaultdict(lambda: {"quantidade": 0, "receita": 0.0, "sku": ""})
+    cache_key = f"produtos_{date_from}_{date_to}_{limit}"
+    cached = _get_cache(cache_key)
+    if cached is not None:
+        return cached
 
-    for row in produtos_raw:
-        nome = row.get('nome_produto_simples') or row.get('nome_produto') or 'Desconhecido'
-        sku = row.get('sku_produto') or ''
-        qtd = int(row.get('quantidade') or 0)
-        preco = float(row.get('preco') or 0)
-        por_produto[nome]["quantidade"] += qtd
-        por_produto[nome]["receita"] += preco * qtd
-        por_produto[nome]["sku"] = sku
+    logger.info(f"🛍️ Buscando top produtos via RPC: {date_from} → {date_to}")
 
-    return sorted(
-        [{"nome": k, "sku": v["sku"], "quantidade": v["quantidade"], "receita": round(v["receita"], 2)}
-         for k, v in por_produto.items()],
-        key=lambda x: -x["receita"]
-    )[:limit]
+    result = _call_rpc("get_top_produtos", {
+        "p_date_from": date_from,
+        "p_date_to": date_to,
+        "p_limit": limit
+    })
+
+    if not result:
+        result = []
+
+    _set_cache(cache_key, result)
+    return result
 
 
-def get_dashboard_completo(date_from: str, date_to: Optional[str] = None) -> Dict[str, Any]:
+def get_dashboard_completo(
+    date_from: str,
+    date_to: Optional[str] = None
+) -> Dict[str, Any]:
     """
-    Retorna todos os dados do dashboard em uma única chamada.
-    Usa cache interno para evitar re-processamento.
+    Retorna todos os dados do dashboard em uma única chamada RPC.
+    O banco executa todas as agregações internamente e retorna o resultado.
     """
     if not date_to:
         date_to = datetime.now().strftime('%Y-%m-%d')
@@ -385,77 +282,28 @@ def get_dashboard_completo(date_from: str, date_to: Optional[str] = None) -> Dic
         logger.info("📦 Dashboard servido do cache")
         return cached
 
-    logger.info(f"🏗️ Construindo dashboard: {date_from} → {date_to}")
+    logger.info(f"🏗️ Buscando dashboard completo via RPC: {date_from} → {date_to}")
     start = time.time()
 
-    # Busca os dados base uma única vez (pedidos_unicos — rápido)
-    pedidos = _fetch_pedidos_pagos(date_from, date_to)
+    result = _call_rpc("get_dashboard_completo", {
+        "p_date_from": date_from,
+        "p_date_to": date_to
+    })
 
-    # Calcula todas as métricas a partir dos dados em memória
-    receita_total = sum(p['total'] for p in pedidos)
-    total_pedidos = len(pedidos)
-    clientes_unicos = len(set(p['email'] for p in pedidos if p['email']))
+    elapsed = time.time() - start
+    logger.info(f"✅ Dashboard completo obtido em {elapsed:.2f}s")
 
-    # Agrega por dimensão em uma única passagem
-    timeline_data = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
-    por_origem = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
-    por_metodo = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
-    por_estado = defaultdict(lambda: {"pedidos": 0, "receita": 0.0})
-
-    for p in pedidos:
-        dia = p['pago_em']
-        if dia:
-            timeline_data[dia]["pedidos"] += 1
-            timeline_data[dia]["receita"] += p['total']
-
-        origem = p['origem'] or 'unknown'
-        por_origem[origem]["pedidos"] += 1
-        por_origem[origem]["receita"] += p['total']
-
-        metodo = p['metodo'] or 'unknown'
-        por_metodo[metodo]["pedidos"] += 1
-        por_metodo[metodo]["receita"] += p['total']
-
-        estado = p['estado'] or 'Desconhecido'
-        por_estado[estado]["pedidos"] += 1
-        por_estado[estado]["receita"] += p['total']
-
-    # Top produtos (busca separada em pedidos_consolidado)
-    top_produtos = get_top_produtos(date_from, date_to, 10)
-
-    result = {
-        "kpis": {
-            "total_pedidos": total_pedidos,
-            "receita_total": round(receita_total, 2),
-            "ticket_medio": round(receita_total / total_pedidos, 2) if total_pedidos > 0 else 0.0,
-            "total_clientes": clientes_unicos,
-            "periodo": {"de": date_from, "ate": date_to}
-        },
-        "timeline": [
-            {"data": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-            for k, v in sorted(timeline_data.items())
-        ],
-        "canais": {
-            "por_origem": sorted(
-                [{"canal": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-                 for k, v in por_origem.items()],
-                key=lambda x: -x["receita"]
-            ),
-            "por_pagamento": sorted(
-                [{"metodo": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-                 for k, v in por_metodo.items()],
-                key=lambda x: -x["receita"]
-            )
-        },
-        "por_estado": sorted(
-            [{"estado": k, "pedidos": v["pedidos"], "receita": round(v["receita"], 2)}
-             for k, v in por_estado.items()],
-            key=lambda x: -x["receita"]
-        ),
-        "top_produtos": top_produtos,
-        "gerado_em": datetime.now().isoformat(),
-        "tempo_processamento_s": round(time.time() - start, 2)
-    }
+    if not result:
+        result = {
+            "kpis": get_kpis(date_from, date_to),
+            "timeline": get_timeline(date_from, date_to),
+            "canais": get_por_canal(date_from, date_to),
+            "top_produtos": get_top_produtos(date_from, date_to),
+            "por_estado": get_por_estado(date_from, date_to),
+            "gerado_em": datetime.now().isoformat()
+        }
+    else:
+        result["tempo_processamento_s"] = round(elapsed, 2)
 
     _set_cache(cache_key, result)
     return result
