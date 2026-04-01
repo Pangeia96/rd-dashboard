@@ -159,25 +159,9 @@ export const useDashboardStore = defineStore('dashboard', () => {
     }
   }
 
-  // Carrega dados em paralelo (mais rápido para primeira carga)
+  // Carrega todos os dados em uma única chamada ao endpoint /db/dashboard
   async function fetchTudo() {
-    loading.value = true
-    error.value = null
-    try {
-      await Promise.all([
-        fetchKpis(),
-        fetchCanais(),
-      ])
-      // Timeline e produtos em segundo plano
-      fetchTimeline()
-      fetchEstados()
-      fetchProdutos()
-    } catch (e) {
-      error.value = 'Erro ao carregar dados.'
-      console.error(e)
-    } finally {
-      loading.value = false
-    }
+    await fetchDashboardCompleto()
   }
 
   function setDateRange(from, to) {

@@ -200,7 +200,7 @@
           <p class="font-semibold text-yellow-800 text-sm">Dados de Automação RD Station</p>
           <p class="text-xs text-yellow-700 mt-1">
             Os dados de fluxos de automação, e-mail e WhatsApp serão exibidos após a
-            <a href="http://localhost:8000/auth/login" target="_blank" class="underline font-semibold">autenticação OAuth</a>
+            <a href="https://rd-dashboard-backend.onrender.com/auth/login" target="_blank" class="underline font-semibold">autenticação OAuth</a>
             ser concluída. Os dados de vendas acima são carregados diretamente do Supabase.
           </p>
         </div>
